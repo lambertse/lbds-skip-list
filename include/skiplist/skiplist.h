@@ -3,9 +3,8 @@
 #include <cstddef>
 #include <functional>
 #include <memory>
-#include <utility>
 
-namespace skip_list {
+namespace lbds::skip_list {
 
 template <typename T, typename Compare = std::less<T>>
 class SkipList {
@@ -15,11 +14,11 @@ class SkipList {
 
   ~SkipList();
 
-  SkipList(const SkipList& other);
-  SkipList& operator=(const SkipList& other);
+  SkipList(const SkipList& other) = delete;
+  SkipList& operator=(const SkipList& other) = delete;
 
-  SkipList(SkipList&& other) noexcept;
-  SkipList& operator=(SkipList&& other) noexcept;
+  SkipList(SkipList&& other) = delete;
+  SkipList& operator=(SkipList&& other) = delete;
 
   [[nodiscard]] bool insert(const T& value);
   [[nodiscard]] bool insert(T&& value);
@@ -37,6 +36,6 @@ class SkipList {
   std::unique_ptr<Impl> impl_;
 };
 
-}  // namespace skip_list
+}  // namespace lbds::skip_list
 
 #include <skiplist/detail/skip_list_impl.h>
