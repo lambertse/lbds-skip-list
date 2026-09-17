@@ -1,14 +1,13 @@
 #pragma once
 
-#include <_stdlib.h>
 #include <skiplist/skiplist.h>
 
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <ctime>
 #include <iostream>
 #include <memory>
-#include <stdexcept>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -24,9 +23,15 @@ using internal::Util;
 template <typename T>
 class Node {
  public:
-  Node(const T& inValue, Level inLevel = 1) : value(inValue), level(inLevel) {
-    next = std::vector<std::shared_ptr<Node>>(MAX_LEVEL, NULL);
-  }
+  explicit Node(const T& inValue, Level inLevel = 0)
+      : value(inValue),
+        level(inLevel),
+        next(static_cast<std::size_t>(inLevel) + 1, nullptr) {}
+
+  explicit Node(T&& inValue, Level inLevel = 0)
+      : value(std::move(inValue)),
+        level(inLevel),
+        next(static_cast<std::size_t>(inLevel) + 1, nullptr) {}
 
   T value;
   Level level;
@@ -37,16 +42,9 @@ using NodePtr = std::shared_ptr<Node<T>>;
 
 template <typename T, typename Compare>
 class SkipList<T, Compare>::Impl {
-  // The head sentinel is a full Node and therefore holds a T. Splitting a
-  // value-less NodeBase out of Node would lift this requirement; until then,
-  // fail here with a readable message instead of deep inside make_shared.
-  static_assert(std::is_default_constructible_v<T>,
-                "SkipList<T> requires T to be default-constructible: the head "
-                "sentinel stores a value-initialised T.");
-
  public:
   explicit Impl(Compare inCompare) : compare(std::move(inCompare)) {
-    head = std::make_shared<Node<T>>(NULL, MAX_LEVEL);
+    head = std::make_shared<Node<T>>(NULL, MAX_LEVEL - 1);
 
     curLevel = 0;
     totalSize = 0;
@@ -70,7 +68,7 @@ class SkipList<T, Compare>::Impl {
   [[nodiscard]] bool empty() const noexcept;
   [[nodiscard]] std::size_t size() const noexcept;
 
-  void display() const noexcept;
+  void display() const;
   void clear() noexcept;
 
   Compare compare;
@@ -79,6 +77,10 @@ class SkipList<T, Compare>::Impl {
 
   NodePtr<T> head;
   Level curLevel;
+
+ private:
+  template <typename U>
+  [[nodiscard]] bool insertValue(U&& value);
 };
 
 template <typename T, typename Compare>
@@ -88,7 +90,7 @@ SkipList<T, Compare>::SkipList() {
 
 template <typename T, typename Compare>
 SkipList<T, Compare>::SkipList(Compare compare) {
-  impl_ = std::unique_ptr<Impl>(std::move(compare));
+  impl_ = std::make_unique<Impl>(std::move(compare));
 }
 
 template <typename T, typename Compare>
@@ -124,17 +126,18 @@ void SkipList<T, Compare>::clear() noexcept {
   impl_->clear();
 }
 template <typename T, typename Compare>
-void SkipList<T, Compare>::display() const noexcept {
+void SkipList<T, Compare>::display() const {
   impl_->display();
 }
 
 // private implementation
 template <typename T, typename Compare>
-bool SkipList<T, Compare>::Impl::insert(const T& value) {
-  assert(head != NULL);
-  NodePtr cur = head;
+template <typename U>
+bool SkipList<T, Compare>::Impl::insertValue(U&& value) {
+  assert(head != nullptr);
 
-  auto updateNode = std::vector<NodePtr<T>>(MAX_LEVEL, NULL);
+  NodePtr<T> cur = head;
+  auto updateNode = std::vector<NodePtr<T>>(MAX_LEVEL, nullptr);
 
   // Find the inserting position
   for (int i = curLevel; i >= 0; i--) {
@@ -144,20 +147,21 @@ bool SkipList<T, Compare>::Impl::insert(const T& value) {
     updateNode[i] = cur;
   }
 
-  if (cur != NULL && cur->value == value) return true;
+  const NodePtr<T>& candidate = cur->next[0];
+  // candidate is already exist
+  if (candidate && !compare(value, candidate->value)) return false;
 
-  Level rlevel = Util::randomLevel(rng);
+  const Level rlevel = Util::randomLevel(rng);
 
-  // If rlevel is greater than current level, assign updateNode in these list
-  // for head
   if (rlevel > curLevel) {
     for (int level = curLevel + 1; level <= rlevel; level++) {
       updateNode[level] = head;
     }
-    curLevel = rlevel;
   }
 
-  auto newNode = std::make_shared<Node<T>>(value, rlevel);
+  auto newNode = std::make_shared<Node<T>>(std::forward<U>(value), rlevel);
+  if (rlevel > curLevel) curLevel = rlevel;
+
   for (int i = 0; i <= rlevel; i++) {
     newNode->next[i] = updateNode[i]->next[i];
     updateNode[i]->next[i] = newNode;
@@ -166,15 +170,18 @@ bool SkipList<T, Compare>::Impl::insert(const T& value) {
 
   return true;
 }
+
+template <typename T, typename Compare>
+bool SkipList<T, Compare>::Impl::insert(const T& value) {
+  return insertValue(value);
+}
 template <typename T, typename Compare>
 bool SkipList<T, Compare>::Impl::insert(T&& value) {
-  return insert(value);
+  return insertValue(std::move(value));
 }
 
 template <typename T, typename Compare>
 bool SkipList<T, Compare>::Impl::contains(const T& value) const {
-  if (!value) return false;
-
   NodePtr<T> cur = head;
   for (int level = curLevel; level >= 0; --level) {
     while (cur->next[level] && compare(cur->next[level]->value, value)) {
@@ -189,7 +196,7 @@ bool SkipList<T, Compare>::Impl::contains(const T& value) const {
 template <typename T, typename Compare>
 bool SkipList<T, Compare>::Impl::erase(const T& value) {
   auto cur = head;
-  auto updateNode = std::vector<NodePtr<T>>(MAX_LEVEL, NULL);
+  auto updateNode = std::vector<NodePtr<T>>(MAX_LEVEL, nullptr);
 
   // Find the inserting position
   for (int i = curLevel; i >= 0; i--) {
@@ -203,8 +210,8 @@ bool SkipList<T, Compare>::Impl::erase(const T& value) {
   auto target = cur->next[0];
   if (!target || compare(value, target->value)) return false;
 
-  // Unlink only at levels where the predecessor actually points at target.
-  for (int level = 0; level <= curLevel; ++level) {
+  const Level top = target->level < curLevel ? target->level : curLevel;
+  for (Level level = 0; level <= top; ++level) {
     if (updateNode[level]->next[level] != target) break;
     updateNode[level]->next[level] = target->next[level];
   }
@@ -227,7 +234,7 @@ std::size_t SkipList<T, Compare>::Impl::size() const noexcept {
 }
 
 template <typename T, typename Compare>
-void SkipList<T, Compare>::Impl::display() const noexcept {
+void SkipList<T, Compare>::Impl::display() const {
   for (int level = curLevel; level >= 0; level--) {
     std::cout << "Level " << level << ": ";
     auto cur = head->next[level];

@@ -20,6 +20,8 @@ class SkipList {
   SkipList(SkipList&& other) = delete;
   SkipList& operator=(SkipList&& other) = delete;
 
+  // Return true when the value was inserted, false when an equivalent value
+  // (under Compare) was already present.
   [[nodiscard]] bool insert(const T& value);
   [[nodiscard]] bool insert(T&& value);
 
@@ -29,7 +31,7 @@ class SkipList {
   [[nodiscard]] bool empty() const noexcept;
   [[nodiscard]] std::size_t size() const noexcept;
 
-  void display() const noexcept;
+  void display() const;
   void clear() noexcept;
 
  private:
