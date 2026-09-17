@@ -42,9 +42,13 @@ using NodePtr = std::shared_ptr<Node<T>>;
 
 template <typename T, typename Compare>
 class SkipList<T, Compare>::Impl {
+  static_assert(std::is_default_constructible_v<T>,
+                "SkipList<T> requires T to be default-constructible: the head "
+                "sentinel stores a value-initialised T.");
+
  public:
   explicit Impl(Compare inCompare) : compare(std::move(inCompare)) {
-    head = std::make_shared<Node<T>>(NULL, MAX_LEVEL - 1);
+    head = std::make_shared<Node<T>>(T{}, MAX_LEVEL - 1);
 
     curLevel = 0;
     totalSize = 0;

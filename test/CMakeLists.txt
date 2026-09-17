@@ -10,7 +10,7 @@ set(BUILD_GMOCK OFF CACHE BOOL "Do not build GoogleMock" FORCE)
 set(INSTALL_GTEST OFF CACHE BOOL "Do not install GoogleTest" FORCE)
 
 FetchContent_MakeAvailable(googletest)
-file(GLOB TEST_SOURCES ${CMAKE_SOURCE_DIR}/test/*_test.cpp)
+file(GLOB TEST_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/test/*_test.cpp)
 
 foreach(test_src ${TEST_SOURCES})
   get_filename_component(test_name ${test_src} NAME_WE)
