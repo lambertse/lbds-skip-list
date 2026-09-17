@@ -1,11 +1,14 @@
 #pragma once
 
+#include <_stdlib.h>
 #include <skiplist/skiplist.h>
 
 #include <cstddef>
 #include <cstdint>
 #include <ctime>
+#include <iostream>
 #include <memory>
+#include <stdexcept>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -20,17 +23,14 @@ using internal::Util;
 
 template <typename T>
 class Node {
-  using NodePtr = std::shared_ptr<Node>;
-
  public:
-  Node(const T& inValue, Level inLevel = 1, NodePtr inNext = nullptr)
-      : value(inValue),
-        level(inLevel),
-        next(static_cast<std::size_t>(inLevel), inNext) {}
+  Node(const T& inValue, Level inLevel = 1) : value(inValue), level(inLevel) {
+    next = std::vector<std::shared_ptr<Node>>(MAX_LEVEL, NULL);
+  }
 
   T value;
   Level level;
-  std::vector<NodePtr> next;
+  std::vector<std::shared_ptr<Node>> next;
 };
 template <typename T>
 using NodePtr = std::shared_ptr<Node<T>>;
@@ -46,7 +46,7 @@ class SkipList<T, Compare>::Impl {
 
  public:
   explicit Impl(Compare inCompare) : compare(std::move(inCompare)) {
-    head = std::make_shared<Node<T>>(T{}, MAX_LEVEL);
+    head = std::make_shared<Node<T>>(NULL, MAX_LEVEL);
 
     curLevel = 0;
     totalSize = 0;
@@ -54,6 +54,7 @@ class SkipList<T, Compare>::Impl {
           static_cast<uint32_t>(reinterpret_cast<std::uintptr_t>(this));
     rng = rng == 0 ? 1 : rng;
   }
+  Impl() : Impl(Compare()) {}
 
   // Deep copy.
   Impl(const Impl& other) = delete;
@@ -68,6 +69,8 @@ class SkipList<T, Compare>::Impl {
 
   [[nodiscard]] bool empty() const noexcept;
   [[nodiscard]] std::size_t size() const noexcept;
+
+  void display() const noexcept;
   void clear() noexcept;
 
   Compare compare;
@@ -77,6 +80,16 @@ class SkipList<T, Compare>::Impl {
   NodePtr<T> head;
   Level curLevel;
 };
+
+template <typename T, typename Compare>
+SkipList<T, Compare>::SkipList() {
+  impl_ = std::make_unique<Impl>();
+}
+
+template <typename T, typename Compare>
+SkipList<T, Compare>::SkipList(Compare compare) {
+  impl_ = std::unique_ptr<Impl>(std::move(compare));
+}
 
 template <typename T, typename Compare>
 SkipList<T, Compare>::~SkipList() = default;
@@ -110,33 +123,122 @@ template <typename T, typename Compare>
 void SkipList<T, Compare>::clear() noexcept {
   impl_->clear();
 }
+template <typename T, typename Compare>
+void SkipList<T, Compare>::display() const noexcept {
+  impl_->display();
+}
 
 // private implementation
 template <typename T, typename Compare>
 bool SkipList<T, Compare>::Impl::insert(const T& value) {
+  assert(head != NULL);
+  NodePtr cur = head;
+
+  auto updateNode = std::vector<NodePtr<T>>(MAX_LEVEL, NULL);
+
+  // Find the inserting position
+  for (int i = curLevel; i >= 0; i--) {
+    while (cur->next[i] && compare(cur->next[i]->value, value)) {
+      cur = cur->next[i];
+    }
+    updateNode[i] = cur;
+  }
+
+  if (cur != NULL && cur->value == value) return true;
+
+  Level rlevel = Util::randomLevel(rng);
+
+  // If rlevel is greater than current level, assign updateNode in these list
+  // for head
+  if (rlevel > curLevel) {
+    for (int level = curLevel + 1; level <= rlevel; level++) {
+      updateNode[level] = head;
+    }
+    curLevel = rlevel;
+  }
+
+  auto newNode = std::make_shared<Node<T>>(value, rlevel);
+  for (int i = 0; i <= rlevel; i++) {
+    newNode->next[i] = updateNode[i]->next[i];
+    updateNode[i]->next[i] = newNode;
+  }
+  totalSize += 1;
+
   return true;
 }
 template <typename T, typename Compare>
 bool SkipList<T, Compare>::Impl::insert(T&& value) {
-  return true;
+  return insert(value);
 }
+
 template <typename T, typename Compare>
 bool SkipList<T, Compare>::Impl::contains(const T& value) const {
-  return true;
+  if (!value) return false;
+
+  NodePtr<T> cur = head;
+  for (int level = curLevel; level >= 0; --level) {
+    while (cur->next[level] && compare(cur->next[level]->value, value)) {
+      cur = cur->next[level];
+    }
+  }
+
+  NodePtr<T> candidate = cur->next[0];
+  return candidate && !compare(value, candidate->value);
 }
 
 template <typename T, typename Compare>
 bool SkipList<T, Compare>::Impl::erase(const T& value) {
+  auto cur = head;
+  auto updateNode = std::vector<NodePtr<T>>(MAX_LEVEL, NULL);
+
+  // Find the inserting position
+  for (int i = curLevel; i >= 0; i--) {
+    while (cur->next[i] && compare(cur->next[i]->value, value)) {
+      cur = cur->next[i];
+    }
+    updateNode[i] = cur;
+  }
+
+  // cur->next[0] is the first node >= value. Confirm it's an exact match.
+  auto target = cur->next[0];
+  if (!target || compare(value, target->value)) return false;
+
+  // Unlink only at levels where the predecessor actually points at target.
+  for (int level = 0; level <= curLevel; ++level) {
+    if (updateNode[level]->next[level] != target) break;
+    updateNode[level]->next[level] = target->next[level];
+  }
+
+  while (curLevel > 0 && !head->next[curLevel]) {
+    --curLevel;
+  }
+
+  totalSize -= 1;
   return true;
 }
 template <typename T, typename Compare>
 bool SkipList<T, Compare>::Impl::empty() const noexcept {
   return totalSize == 0;
 }
+
 template <typename T, typename Compare>
 std::size_t SkipList<T, Compare>::Impl::size() const noexcept {
   return totalSize;
 }
+
+template <typename T, typename Compare>
+void SkipList<T, Compare>::Impl::display() const noexcept {
+  for (int level = curLevel; level >= 0; level--) {
+    std::cout << "Level " << level << ": ";
+    auto cur = head->next[level];
+    while (cur) {
+      std::cout << cur->value << " - ";
+      cur = cur->next[level];
+    }
+    std::cout << std::endl;
+  }
+}
+
 template <typename T, typename Compare>
 void SkipList<T, Compare>::Impl::clear() noexcept {
   NodePtr<T> node = head->next.empty() ? nullptr : head->next[0];

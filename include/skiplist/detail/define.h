@@ -10,5 +10,6 @@ using Level = int;
 // With P = 1/4 that supports ~4^16 (~4e9) elements, so there is nothing to gain
 // from a taller head sentinel.
 constexpr Level MAX_LEVEL = 17;
+constexpr double P = 0.25;
 
 }  // namespace lbds::skip_list::internal

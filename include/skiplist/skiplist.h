@@ -29,6 +29,7 @@ class SkipList {
   [[nodiscard]] bool empty() const noexcept;
   [[nodiscard]] std::size_t size() const noexcept;
 
+  void display() const noexcept;
   void clear() noexcept;
 
  private:
