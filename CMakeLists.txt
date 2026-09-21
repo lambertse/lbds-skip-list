@@ -9,7 +9,9 @@ project(
 
 # Generate build/compile_commands.json.
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
 option(SKIPLIST_BUILD_TESTS "Build skiplist tests" ON)
+option(SKIPLIST_BUILD_BENCHMARKS "Build skiplist benchmarks" OFF)
 
 # Header-only skiplist library.
 add_library(skiplist INTERFACE)
@@ -32,4 +34,8 @@ if(SKIPLIST_BUILD_TESTS)
   enable_testing()
   include(CTest)
   add_subdirectory(test)
+endif()
+
+if(SKIPLIST_BUILD_BENCHMARKS)
+  add_subdirectory(benchmark)
 endif()

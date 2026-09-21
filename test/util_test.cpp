@@ -77,14 +77,16 @@ TEST(RandomLevel, StaysWithinTheLevelCap) {
   // A level of MAX_LEVEL or more would index past every node's next[] array.
   uint32_t rng = 1;
   Level lowest = MAX_LEVEL;
-  Level highest = -1;
+  Level highest = 0;
   for (int i = 0; i < 2000000; ++i) {
     const Level level = Util::randomLevel(rng);
     if (level < lowest) lowest = level;
     if (level > highest) highest = level;
   }
 
-  EXPECT_GE(lowest, 0);
+  // Level is unsigned, so "not below 0" asserts nothing; over 2M draws at
+  // P = 0.25 an unpromoted draw is certain, so pin the floor at exactly 0.
+  EXPECT_EQ(lowest, Level{0});
   EXPECT_LE(highest, MAX_LEVEL - 1);
 }
 
@@ -121,7 +123,8 @@ TEST(RandomLevel, IsGeometricallyDistributed) {
     const double tolerance =
         5.0 * std::sqrt(expectedShare * (1.0 - expectedShare) / kDraws);
 
-    EXPECT_NEAR(observedShare, expectedShare, tolerance) << "at level " << k;
+    EXPECT_NEAR(observedShare, expectedShare, tolerance)
+        << "at level " << static_cast<unsigned>(k);
     expectedShare *= P;
   }
 }
@@ -149,7 +152,8 @@ TEST(RandomLevel, ConsumesTheExpectedNumberOfDraws) {
 
   uint32_t rng = 31337;
   long long draws = 0;
-  for (int i = 0; i < kCalls; ++i) draws += Util::randomLevel(rng) + 1;
+  for (int i = 0; i < kCalls; ++i)
+    draws += static_cast<long long>(Util::randomLevel(rng)) + 1;
 
   EXPECT_NEAR(static_cast<double>(draws) / kCalls, 1.0 / (1.0 - P), 0.02);
 }

@@ -2,15 +2,16 @@
 
 #include <skiplist/skiplist.h>
 
+#include <array>
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <ctime>
 #include <iostream>
-#include <memory>
+#include <iterator>
+#include <new>
 #include <type_traits>
 #include <utility>
-#include <vector>
 
 #include "define.h"
 #include "util.h"
@@ -23,22 +24,121 @@ using internal::Util;
 template <typename T>
 class Node {
  public:
-  explicit Node(const T& inValue, Level inLevel = 0)
-      : value(inValue),
-        level(inLevel),
-        next(static_cast<std::size_t>(inLevel) + 1, nullptr) {}
+  Node(const Node&) = delete;
+  Node& operator=(const Node&) = delete;
 
-  explicit Node(T&& inValue, Level inLevel = 0)
-      : value(std::move(inValue)),
-        level(inLevel),
-        next(static_cast<std::size_t>(inLevel) + 1, nullptr) {}
+  [[nodiscard]] Node*& link(Level atLevel) noexcept {
+    return *(next_ + atLevel);
+  }
+  [[nodiscard]] Node* link(Level atLevel) const noexcept {
+    return *(next_ + atLevel);
+  }
+
+  template <typename U>
+  [[nodiscard]] static Node* create(U&& value, Level level) {
+    void* raw = allocate(level);
+    try {
+      return new (raw) Node(std::forward<U>(value), level);
+    } catch (...) {
+      deallocate(raw, level);
+      throw;
+    }
+  }
+
+  static void destroy(Node* node) noexcept {
+    const Level level = node->level;
+    node->~Node();
+    deallocate(node, level);
+  }
 
   T value;
   Level level;
-  std::vector<std::shared_ptr<Node>> next;
+
+ private:
+  template <typename U>
+  Node(U&& inValue, Level inLevel)
+      : value(std::forward<U>(inValue)), level(inLevel) {
+    for (Level i = 0; i <= inLevel; ++i) link(i) = nullptr;
+  }
+
+  ~Node() = default;
+
+  static std::size_t bytesFor(Level atLevel) noexcept {
+    return sizeof(Node) + sizeof(Node*) * atLevel;
+  }
+
+  // Almost every T is ordinarily aligned, and the plain operator new is the
+  // faster path; the aligned overload is only worth reaching for when T
+  // actually demands it.
+  static constexpr bool overAligned() noexcept {
+    return alignof(Node) > __STDCPP_DEFAULT_NEW_ALIGNMENT__;
+  }
+
+  static void* allocate(Level atLevel) {
+    if constexpr (overAligned()) {
+      return ::operator new(bytesFor(atLevel), std::align_val_t{alignof(Node)});
+    } else {
+      return ::operator new(bytesFor(atLevel));
+    }
+  }
+
+  static void deallocate(void* raw, Level atLevel) noexcept {
+    if constexpr (overAligned()) {
+      ::operator delete(raw, bytesFor(atLevel),
+                        std::align_val_t{alignof(Node)});
+    } else {
+      ::operator delete(raw, bytesFor(atLevel));
+    }
+  }
+
+  Node* next_[1];
 };
+
 template <typename T>
-using NodePtr = std::shared_ptr<Node<T>>;
+using UpdatePath = std::array<Node<T>*, MAX_LEVEL>;
+
+namespace internal {
+
+template <typename T>
+class ConstIterator {
+ public:
+  using iterator_category = std::forward_iterator_tag;
+  using value_type = T;
+  using difference_type = std::ptrdiff_t;
+  using pointer = const T*;
+  using reference = const T&;
+
+  ConstIterator() noexcept : node_(nullptr) {}
+  explicit ConstIterator(const Node<T>* node) noexcept : node_(node) {}
+
+  reference operator*() const noexcept { return node_->value; }
+  pointer operator->() const noexcept { return &node_->value; }
+
+  ConstIterator& operator++() noexcept {
+    node_ = node_->link(0);
+    return *this;
+  }
+
+  ConstIterator operator++(int) noexcept {
+    ConstIterator previous = *this;
+    ++*this;
+    return previous;
+  }
+
+  friend bool operator==(const ConstIterator& a,
+                         const ConstIterator& b) noexcept {
+    return a.node_ == b.node_;
+  }
+  friend bool operator!=(const ConstIterator& a,
+                         const ConstIterator& b) noexcept {
+    return a.node_ != b.node_;
+  }
+
+ private:
+  const Node<T>* node_;
+};
+
+}  // namespace internal
 
 template <typename T, typename Compare>
 class SkipList<T, Compare>::Impl {
@@ -48,7 +148,7 @@ class SkipList<T, Compare>::Impl {
 
  public:
   explicit Impl(Compare inCompare) : compare(std::move(inCompare)) {
-    head = std::make_shared<Node<T>>(T{}, MAX_LEVEL - 1);
+    head = Node<T>::create(T{}, MAX_LEVEL - 1);
 
     curLevel = 0;
     totalSize = 0;
@@ -58,15 +158,16 @@ class SkipList<T, Compare>::Impl {
   }
   Impl() : Impl(Compare()) {}
 
-  // Deep copy.
   Impl(const Impl& other) = delete;
   Impl& operator=(const Impl&) = delete;
 
-  ~Impl() { clear(); }
+  ~Impl() {
+    clear();
+    Node<T>::destroy(head);
+  }
 
   [[nodiscard]] bool insert(const T& value);
   [[nodiscard]] bool insert(T&& value);
-  [[nodiscard]] bool contains(const T& value) const;
   [[nodiscard]] bool erase(const T& value);
 
   [[nodiscard]] bool empty() const noexcept;
@@ -75,16 +176,24 @@ class SkipList<T, Compare>::Impl {
   void display() const;
   void clear() noexcept;
 
+  [[nodiscard]] Node<T>* lowerBound(const T& value) const;
+  [[nodiscard]] Node<T>* upperBound(const T& value) const;
+
   Compare compare;
   std::size_t totalSize;
   uint32_t rng;
 
-  NodePtr<T> head;
+  Node<T>* head;
   Level curLevel;
 
  private:
   template <typename U>
   [[nodiscard]] bool insertValue(U&& value);
+
+  // Fills `path` with the last node ordered before `value` at each level and
+  // returns the candidate at level 0 -- the shared skeleton of insert and
+  // erase.
+  Node<T>* descend(const T& value, UpdatePath<T>& path) const;
 };
 
 template <typename T, typename Compare>
@@ -110,10 +219,6 @@ bool SkipList<T, Compare>::insert(T&& value) {
   return impl_->insert(std::move(value));
 }
 template <typename T, typename Compare>
-bool SkipList<T, Compare>::contains(const T& value) const {
-  return impl_->contains(value);
-}
-template <typename T, typename Compare>
 bool SkipList<T, Compare>::erase(const T& value) {
   return impl_->erase(value);
 }
@@ -134,41 +239,114 @@ void SkipList<T, Compare>::display() const {
   impl_->display();
 }
 
+template <typename T, typename Compare>
+typename SkipList<T, Compare>::const_iterator SkipList<T, Compare>::begin()
+    const noexcept {
+  return const_iterator(impl_->head->link(0));
+}
+template <typename T, typename Compare>
+typename SkipList<T, Compare>::const_iterator SkipList<T, Compare>::end()
+    const noexcept {
+  return const_iterator(nullptr);
+}
+template <typename T, typename Compare>
+typename SkipList<T, Compare>::const_iterator SkipList<T, Compare>::cbegin()
+    const noexcept {
+  return begin();
+}
+template <typename T, typename Compare>
+typename SkipList<T, Compare>::const_iterator SkipList<T, Compare>::cend()
+    const noexcept {
+  return end();
+}
+template <typename T, typename Compare>
+typename SkipList<T, Compare>::const_iterator SkipList<T, Compare>::find(
+    const T& value) const {
+  Node<T>* candidate = impl_->lowerBound(value);
+  const bool equivalent = candidate && !impl_->compare(value, candidate->value);
+  return const_iterator(equivalent ? candidate : nullptr);
+}
+template <typename T, typename Compare>
+typename SkipList<T, Compare>::const_iterator SkipList<T, Compare>::lower_bound(
+    const T& value) const {
+  return const_iterator(impl_->lowerBound(value));
+}
+template <typename T, typename Compare>
+typename SkipList<T, Compare>::const_iterator SkipList<T, Compare>::upper_bound(
+    const T& value) const {
+  return const_iterator(impl_->upperBound(value));
+}
+
 // private implementation
+template <typename T, typename Compare>
+Node<T>* SkipList<T, Compare>::Impl::descend(const T& value,
+                                             UpdatePath<T>& path) const {
+  assert(head != nullptr);
+
+  Node<T>* cur = head;
+  // Level is unsigned, so a descending loop cannot test `level >= 0` -- that
+  // is always true and the decrement past 0 wraps. Start one above the top and
+  // decrement in the condition, which visits curLevel down to 0 and stops.
+  for (Level level = curLevel + 1; level-- > 0;) {
+    while (cur->link(level) && compare(cur->link(level)->value, value)) {
+      cur = cur->link(level);
+    }
+    path[level] = cur;
+  }
+  return cur->link(0);
+}
+
+template <typename T, typename Compare>
+Node<T>* SkipList<T, Compare>::Impl::lowerBound(const T& value) const {
+  Node<T>* cur = head;
+  for (Level level = curLevel + 1; level-- > 0;) {
+    // Move left (same level) if the next Node value is still less than source
+    // value
+    while (cur->link(level) && compare(cur->link(level)->value, value)) {
+      cur = cur->link(level);
+    }
+  }
+  return cur->link(0);
+}
+
+template <typename T, typename Compare>
+Node<T>* SkipList<T, Compare>::Impl::upperBound(const T& value) const {
+  Node<T>* cur = head;
+  for (Level level = curLevel + 1; level-- > 0;) {
+    // Move left (same level) if the source value is greater or equal next Node
+    // value
+    while (cur->link(level) && !compare(value, cur->link(level)->value)) {
+      cur = cur->link(level);
+    }
+  }
+  return cur->link(0);
+}
+
 template <typename T, typename Compare>
 template <typename U>
 bool SkipList<T, Compare>::Impl::insertValue(U&& value) {
-  assert(head != nullptr);
+  UpdatePath<T> updateNode{};
+  Node<T>* candidate = descend(value, updateNode);
 
-  NodePtr<T> cur = head;
-  auto updateNode = std::vector<NodePtr<T>>(MAX_LEVEL, nullptr);
-
-  // Find the inserting position
-  for (int i = curLevel; i >= 0; i--) {
-    while (cur->next[i] && compare(cur->next[i]->value, value)) {
-      cur = cur->next[i];
-    }
-    updateNode[i] = cur;
-  }
-
-  const NodePtr<T>& candidate = cur->next[0];
-  // candidate is already exist
+  // descend() stops at the first node not ordered before `value`; it is a
+  // duplicate exactly when `value` is not ordered before it either.
   if (candidate && !compare(value, candidate->value)) return false;
 
   const Level rlevel = Util::randomLevel(rng);
 
   if (rlevel > curLevel) {
-    for (int level = curLevel + 1; level <= rlevel; level++) {
+    for (Level level = curLevel + 1; level <= rlevel; level++) {
       updateNode[level] = head;
     }
   }
 
-  auto newNode = std::make_shared<Node<T>>(std::forward<U>(value), rlevel);
+  Node<T>* newNode = Node<T>::create(std::forward<U>(value), rlevel);
   if (rlevel > curLevel) curLevel = rlevel;
 
-  for (int i = 0; i <= rlevel; i++) {
-    newNode->next[i] = updateNode[i]->next[i];
-    updateNode[i]->next[i] = newNode;
+  for (Level level = 0; level <= rlevel; level++) {
+    Node<T>* predecessor = updateNode[level];
+    newNode->link(level) = predecessor->link(level);
+    predecessor->link(level) = newNode;
   }
   totalSize += 1;
 
@@ -185,48 +363,28 @@ bool SkipList<T, Compare>::Impl::insert(T&& value) {
 }
 
 template <typename T, typename Compare>
-bool SkipList<T, Compare>::Impl::contains(const T& value) const {
-  NodePtr<T> cur = head;
-  for (int level = curLevel; level >= 0; --level) {
-    while (cur->next[level] && compare(cur->next[level]->value, value)) {
-      cur = cur->next[level];
-    }
-  }
-
-  NodePtr<T> candidate = cur->next[0];
-  return candidate && !compare(value, candidate->value);
-}
-
-template <typename T, typename Compare>
 bool SkipList<T, Compare>::Impl::erase(const T& value) {
-  auto cur = head;
-  auto updateNode = std::vector<NodePtr<T>>(MAX_LEVEL, nullptr);
+  UpdatePath<T> updateNode{};
+  Node<T>* target = descend(value, updateNode);
 
-  // Find the inserting position
-  for (int i = curLevel; i >= 0; i--) {
-    while (cur->next[i] && compare(cur->next[i]->value, value)) {
-      cur = cur->next[i];
-    }
-    updateNode[i] = cur;
-  }
-
-  // cur->next[0] is the first node >= value. Confirm it's an exact match.
-  auto target = cur->next[0];
   if (!target || compare(value, target->value)) return false;
 
   const Level top = target->level < curLevel ? target->level : curLevel;
   for (Level level = 0; level <= top; ++level) {
-    if (updateNode[level]->next[level] != target) break;
-    updateNode[level]->next[level] = target->next[level];
+    Node<T>* predecessor = updateNode[level];
+    if (predecessor->link(level) != target) break;
+    predecessor->link(level) = target->link(level);
   }
 
-  while (curLevel > 0 && !head->next[curLevel]) {
+  while (curLevel > 0 && !head->link(curLevel)) {
     --curLevel;
   }
 
+  Node<T>::destroy(target);
   totalSize -= 1;
   return true;
 }
+
 template <typename T, typename Compare>
 bool SkipList<T, Compare>::Impl::empty() const noexcept {
   return totalSize == 0;
@@ -239,12 +397,14 @@ std::size_t SkipList<T, Compare>::Impl::size() const noexcept {
 
 template <typename T, typename Compare>
 void SkipList<T, Compare>::Impl::display() const {
-  for (int level = curLevel; level >= 0; level--) {
-    std::cout << "Level " << level << ": ";
-    auto cur = head->next[level];
+  for (Level level = curLevel + 1; level-- > 0;) {
+    // Level is a character type, so it needs widening or the stream would
+    // emit the raw byte rather than the number.
+    std::cout << "Level " << static_cast<unsigned>(level) << ": ";
+    const Node<T>* cur = head->link(level);
     while (cur) {
       std::cout << cur->value << " - ";
-      cur = cur->next[level];
+      cur = cur->link(level);
     }
     std::cout << std::endl;
   }
@@ -252,18 +412,14 @@ void SkipList<T, Compare>::Impl::display() const {
 
 template <typename T, typename Compare>
 void SkipList<T, Compare>::Impl::clear() noexcept {
-  NodePtr<T> node = head->next.empty() ? nullptr : head->next[0];
-  for (auto& link : head->next) {
-    link.reset();
-  }
-  while (node) {
-    NodePtr<T> nextNode = node->next.empty() ? nullptr : node->next[0];
-    for (auto& link : node->next) {
-      link.reset();
-    }
-    node = std::move(nextNode);
+  Node<T>* node = head->link(0);
+  while (node != nullptr) {
+    Node<T>* nextNode = node->link(0);
+    Node<T>::destroy(node);
+    node = nextNode;
   }
 
+  for (Level level = 0; level < MAX_LEVEL; ++level) head->link(level) = nullptr;
   curLevel = 0;
   totalSize = 0;
 }
