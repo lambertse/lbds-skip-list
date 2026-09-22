@@ -168,6 +168,9 @@ class SkipList<T, Compare>::Impl {
 
   [[nodiscard]] bool insert(const T& value);
   [[nodiscard]] bool insert(T&& value);
+  [[nodiscard]] bool upsert(const T& value);
+  [[nodiscard]] bool upsert(T&& value);
+
   [[nodiscard]] bool erase(const T& value);
 
   [[nodiscard]] bool empty() const noexcept;
@@ -189,10 +192,15 @@ class SkipList<T, Compare>::Impl {
  private:
   template <typename U>
   [[nodiscard]] bool insertValue(U&& value);
+  template <typename U>
+  [[nodiscard]] bool upsertValue(U&& value);
+
+  template <typename U>
+  void linkNewNode(U&& value, UpdatePath<T>& path);
 
   // Fills `path` with the last node ordered before `value` at each level and
-  // returns the candidate at level 0 -- the shared skeleton of insert and
-  // erase.
+  // returns the candidate at level 0 -- the shared skeleton of insert, upsert
+  // and erase.
   Node<T>* descend(const T& value, UpdatePath<T>& path) const;
 };
 
@@ -217,6 +225,14 @@ bool SkipList<T, Compare>::insert(const T& value) {
 template <typename T, typename Compare>
 bool SkipList<T, Compare>::insert(T&& value) {
   return impl_->insert(std::move(value));
+}
+template <typename T, typename Compare>
+bool SkipList<T, Compare>::upsert(const T& value) {
+  return impl_->upsert(value);
+}
+template <typename T, typename Compare>
+bool SkipList<T, Compare>::upsert(T&& value) {
+  return impl_->upsert(std::move(value));
 }
 template <typename T, typename Compare>
 bool SkipList<T, Compare>::erase(const T& value) {
@@ -324,32 +340,56 @@ Node<T>* SkipList<T, Compare>::Impl::upperBound(const T& value) const {
 
 template <typename T, typename Compare>
 template <typename U>
-bool SkipList<T, Compare>::Impl::insertValue(U&& value) {
-  UpdatePath<T> updateNode{};
-  Node<T>* candidate = descend(value, updateNode);
+void SkipList<T, Compare>::Impl::linkNewNode(U&& value, UpdatePath<T>& path) {
+  const Level newLevel = Util::randomLevel(rng);
 
-  // descend() stops at the first node not ordered before `value`; it is a
-  // duplicate exactly when `value` is not ordered before it either.
-  if (candidate && !compare(value, candidate->value)) return false;
-
-  const Level rlevel = Util::randomLevel(rng);
-
-  if (rlevel > curLevel) {
-    for (Level level = curLevel + 1; level <= rlevel; level++) {
-      updateNode[level] = head;
-    }
+  for (Level level = curLevel + 1; level <= newLevel; ++level) {
+    path[level] = head;
   }
 
-  Node<T>* newNode = Node<T>::create(std::forward<U>(value), rlevel);
-  if (rlevel > curLevel) curLevel = rlevel;
+  Node<T>* newNode = Node<T>::create(std::forward<U>(value), newLevel);
+  if (newLevel > curLevel) curLevel = newLevel;
 
-  for (Level level = 0; level <= rlevel; level++) {
-    Node<T>* predecessor = updateNode[level];
+  for (Level level = 0; level <= newLevel; ++level) {
+    Node<T>* predecessor = path[level];
     newNode->link(level) = predecessor->link(level);
     predecessor->link(level) = newNode;
   }
   totalSize += 1;
+}
 
+template <typename T, typename Compare>
+template <typename U>
+bool SkipList<T, Compare>::Impl::insertValue(U&& value) {
+  UpdatePath<T> path{};
+  Node<T>* candidate = descend(value, path);
+
+  // An equivalent element is already here, and insert leaves it alone.
+  if (candidate && !compare(value, candidate->value)) return false;
+
+  linkNewNode(std::forward<U>(value), path);
+  return true;
+}
+
+template <typename T, typename Compare>
+template <typename U>
+bool SkipList<T, Compare>::Impl::upsertValue(U&& value) {
+  static_assert(std::is_assignable_v<T&, U&&>,
+                "SkipList<T>::upsert requires T to be assignable: replacing "
+                "an equivalent element assigns over the element in place. "
+                "Use insert() for a T that cannot be assigned.");
+
+  UpdatePath<T> path{};
+  Node<T>* candidate = descend(value, path);
+
+  if (candidate && !compare(value, candidate->value)) {
+    // Update and return false;
+    candidate->value = std::forward<U>(value);
+    return false;
+  }
+
+  // Insert and return true
+  linkNewNode(std::forward<U>(value), path);
   return true;
 }
 
@@ -360,6 +400,15 @@ bool SkipList<T, Compare>::Impl::insert(const T& value) {
 template <typename T, typename Compare>
 bool SkipList<T, Compare>::Impl::insert(T&& value) {
   return insertValue(std::move(value));
+}
+
+template <typename T, typename Compare>
+bool SkipList<T, Compare>::Impl::upsert(const T& value) {
+  return upsertValue(value);
+}
+template <typename T, typename Compare>
+bool SkipList<T, Compare>::Impl::upsert(T&& value) {
+  return upsertValue(std::move(value));
 }
 
 template <typename T, typename Compare>

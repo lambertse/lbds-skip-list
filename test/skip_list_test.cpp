@@ -7,6 +7,7 @@
 #include <functional>
 #include <initializer_list>
 #include <iterator>
+#include <map>
 #include <numeric>
 #include <random>
 #include <set>
@@ -171,6 +172,122 @@ TEST(SkipListInsert, BuildsExpressLanesForLargeInputs) {
   for (int i = 0; i < 5000; ++i) ASSERT_TRUE(list.insert(i));
   // With P = 1/4 the chance that not one of 5000 nodes is promoted is ~0.
   EXPECT_GT(LevelCount(list), 1) << "no level above 0 was ever built";
+}
+
+// ---------------------------------------------------------------------------
+// upsert
+//
+// upsert differs from insert on exactly one case: when an equivalent element
+// is already present, insert leaves it alone and upsert assigns over it. Under
+// a comparator that only looks at part of the value, "equivalent" and "equal"
+// are not the same thing, so Entry carries a payload the ordering cannot see
+// -- that payload is what makes a replacement observable at all.
+// ---------------------------------------------------------------------------
+
+struct Entry {
+  int key = 0;
+  std::string payload;
+};
+
+struct ByKey {
+  bool operator()(const Entry& a, const Entry& b) const {
+    return a.key < b.key;
+  }
+};
+
+// So the display()-based helpers can read an Entry list too.
+std::ostream& operator<<(std::ostream& os, const Entry& entry) {
+  return os << entry.key << ":" << entry.payload;
+}
+
+TEST(SkipListUpsert, AddsValuesThatAreNotYetPresent) {
+  SkipList<int> list;
+  EXPECT_TRUE(list.upsert(2));
+  EXPECT_TRUE(list.upsert(1));
+  EXPECT_TRUE(list.upsert(3));
+  EXPECT_EQ(list.size(), 3u);
+  EXPECT_EQ(Contents(list), Strings({1, 2, 3}));
+}
+
+TEST(SkipListUpsert, ReportsFalseAndAddsNothingWhenTheValueIsAlreadyPresent) {
+  SkipList<int> list;
+  EXPECT_TRUE(list.upsert(7));
+  EXPECT_FALSE(list.upsert(7));
+  EXPECT_FALSE(list.upsert(7));
+  EXPECT_EQ(list.size(), 1u);
+  EXPECT_EQ(Contents(list), Strings({7}));
+}
+
+TEST(SkipListUpsert, ReplacesTheElementAnInsertWouldHaveRejected) {
+  SkipList<Entry, ByKey> list;
+  ASSERT_TRUE(list.upsert(Entry{2, "first"}));
+  ASSERT_FALSE(list.upsert(Entry{2, "second"}));
+
+  EXPECT_EQ(list.size(), 1u);
+  ASSERT_NE(list.find(Entry{2, {}}), list.end());
+  EXPECT_EQ(list.find(Entry{2, {}})->payload, "second");
+
+  // The same call through insert leaves the stored element alone, which is the
+  // whole of the difference between the two.
+  ASSERT_FALSE(list.insert(Entry{2, "third"}));
+  EXPECT_EQ(list.find(Entry{2, {}})->payload, "second");
+}
+
+TEST(SkipListUpsert, ReplacesTheLargestElement) {
+  // The largest element has no successor, so an implementation that reaches
+  // through the matched node's level-0 link walks off the end of the list.
+  SkipList<Entry, ByKey> list;
+  for (int key : {1, 2, 3}) ASSERT_TRUE(list.upsert(Entry{key, "old"}));
+
+  ASSERT_FALSE(list.upsert(Entry{3, "new"}));
+  EXPECT_EQ(list.size(), 3u);
+  EXPECT_EQ(list.find(Entry{3, {}})->payload, "new");
+
+  // The same case again with nothing else in the list at all.
+  SkipList<Entry, ByKey> single;
+  ASSERT_TRUE(single.upsert(Entry{1, "old"}));
+  ASSERT_FALSE(single.upsert(Entry{1, "new"}));
+  EXPECT_EQ(single.find(Entry{1, {}})->payload, "new");
+}
+
+TEST(SkipListUpsert, TouchesNoElementButTheMatchedOne) {
+  // A replacement belongs in exactly one node. Writing through the search path
+  // at every level instead reaches nodes that are not the match -- above the
+  // matched node's own height the path points past it -- which either corrupts
+  // an unrelated element or runs off the end. With 1000 elements the list
+  // spans several levels and most nodes sit at level 0, so a per-level write
+  // would be near certain to land somewhere it does not belong.
+  constexpr int kCount = 1000;
+  SkipList<Entry, ByKey> list;
+  for (int key = 0; key < kCount; ++key) {
+    ASSERT_TRUE(list.insert(Entry{key, "old"}));
+  }
+  ASSERT_GT(LevelCount(list), 1) << "the list never grew past level 0";
+
+  for (int key = 0; key < kCount; ++key) {
+    ASSERT_FALSE(list.upsert(Entry{key, "new"})) << key;
+    ASSERT_EQ(list.size(), static_cast<std::size_t>(kCount)) << key;
+  }
+
+  int expectedKey = 0;
+  for (const Entry& entry : list) {
+    ASSERT_EQ(entry.key, expectedKey) << "an element moved or was overwritten";
+    ASSERT_EQ(entry.payload, "new")
+        << "key " << entry.key << " was not updated";
+    ++expectedKey;
+  }
+  EXPECT_EQ(expectedKey, kCount);
+}
+
+TEST(SkipListUpsert, GrowsTheListPastItsCurrentHeight) {
+  // Adding through upsert has to extend the search path above the levels
+  // descend() filled in, exactly as insert does.
+  SkipList<int> list;
+  for (int value = 0; value < 5000; ++value) ASSERT_TRUE(list.upsert(value));
+
+  EXPECT_EQ(list.size(), 5000u);
+  EXPECT_GT(LevelCount(list), 1) << "no level above 0 was ever built";
+  EXPECT_TRUE(std::is_sorted(list.begin(), list.end()));
 }
 
 // ---------------------------------------------------------------------------
@@ -442,6 +559,42 @@ TEST(SkipListValueCategory, RejectedDuplicatesDoNotTouchTheValue) {
   EXPECT_EQ(Tracked::copies, 0);
   EXPECT_EQ(Tracked::moves, 0) << "a rejected insert still built a node";
 }
+
+TEST(SkipListValueCategory, RvalueUpsertMovesIntoTheNewNode) {
+  SkipList<Tracked, TrackedLess> list;
+  Tracked::ResetCounters();
+
+  Tracked value{42};
+  EXPECT_TRUE(list.upsert(std::move(value)));
+  EXPECT_EQ(Tracked::copies, 0);
+  EXPECT_EQ(Tracked::moves, 1);
+}
+
+TEST(SkipListValueCategory, RvalueUpsertMoveAssignsOverAnExistingElement) {
+  SkipList<Tracked, TrackedLess> list;
+  ASSERT_TRUE(list.upsert(Tracked{42}));
+  Tracked::ResetCounters();
+
+  Tracked replacement{42};
+  EXPECT_FALSE(list.upsert(std::move(replacement)));
+  EXPECT_EQ(Tracked::copies, 0);
+  EXPECT_EQ(Tracked::moves, 1);
+  EXPECT_EQ(replacement.value, Tracked::kMovedFrom)
+      << "the replacement was copied into place, not moved";
+}
+
+TEST(SkipListValueCategory, LvalueUpsertCopyAssignsOverAnExistingElement) {
+  SkipList<Tracked, TrackedLess> list;
+  ASSERT_TRUE(list.upsert(Tracked{42}));
+  Tracked::ResetCounters();
+
+  Tracked replacement{42};
+  EXPECT_FALSE(list.upsert(replacement));
+  EXPECT_EQ(Tracked::copies, 1);
+  EXPECT_EQ(Tracked::moves, 0);
+  EXPECT_EQ(replacement.value, 42)
+      << "a copying upsert must not consume its source";
+}
 // ---------------------------------------------------------------------------
 // Element lifetime
 //
@@ -508,6 +661,18 @@ TEST(SkipListLifetime, RejectedInsertDestroysNothingExtra) {
   const int afterFirst = Counted::alive;
   EXPECT_FALSE(list.insert(Counted{1}));
   EXPECT_EQ(Counted::alive, afterFirst) << "a rejected insert built no node";
+  EXPECT_EQ(afterFirst, baseline + 2);
+}
+
+TEST(SkipListLifetime, ReplacingAnElementBuildsNoExtraNode) {
+  const int baseline = Counted::alive;
+  SkipList<Counted, CountedLess> list;
+  ASSERT_TRUE(list.insert(Counted{1}));
+
+  const int afterFirst = Counted::alive;
+  EXPECT_FALSE(list.upsert(Counted{1}));
+  EXPECT_EQ(Counted::alive, afterFirst)
+      << "a replacement assigns over the element in place";
   EXPECT_EQ(afterFirst, baseline + 2);
 }
 
@@ -780,6 +945,51 @@ TEST(SkipListStress, MatchesStdSetUnderRandomOperations) {
     ASSERT_EQ(Contents(list), expected)
         << "contents diverged in trial " << trial;
   }
+}
+
+TEST(SkipListStress, UpsertMatchesInsertOrAssignUnderRandomOperations) {
+  // std::map::insert_or_assign is upsert's closest standard analogue, down to
+  // the meaning of the returned bool, so it makes a ready-made oracle.
+  std::mt19937 rng(20260922);
+  std::uniform_int_distribution<int> keyDist(0, 99);
+  std::uniform_int_distribution<int> opDist(0, 9);
+
+  SkipList<Entry, ByKey> list;
+  std::map<int, std::string> reference;
+
+  for (int step = 0; step < 4000; ++step) {
+    const int key = keyDist(rng);
+    const std::string payload = std::to_string(step);
+    const int choice = opDist(rng);
+
+    if (choice < 6) {
+      const bool added = list.upsert(Entry{key, payload});
+      ASSERT_EQ(added, reference.insert_or_assign(key, payload).second)
+          << "upsert(" << key << ") at step " << step;
+    } else if (choice < 8) {
+      const bool inserted = list.insert(Entry{key, payload});
+      ASSERT_EQ(inserted, reference.emplace(key, payload).second)
+          << "insert(" << key << ") at step " << step;
+    } else {
+      const bool erased = list.erase(Entry{key, {}});
+      ASSERT_EQ(erased, reference.erase(key) != 0)
+          << "erase(" << key << ") at step " << step;
+    }
+
+    ASSERT_EQ(list.size(), reference.size()) << "at step " << step;
+  }
+
+  // Every surviving element must carry the payload of the most recent write to
+  // its key, and the keys must still be in order.
+  auto expected = reference.begin();
+  for (const Entry& entry : list) {
+    ASSERT_NE(expected, reference.end());
+    ASSERT_EQ(entry.key, expected->first);
+    ASSERT_EQ(entry.payload, expected->second)
+        << "stale payload for key " << entry.key;
+    ++expected;
+  }
+  EXPECT_EQ(expected, reference.end());
 }
 
 }  // namespace

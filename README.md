@@ -26,6 +26,7 @@ for (auto it = numbers.lower_bound(10); it != last; ++it) { /* ... */ }
 | Member | Meaning |
 | --- | --- |
 | `insert(const T&)` / `insert(T&&)` | `true` if inserted, `false` if an equivalent element was already present |
+| `upsert(const T&)` / `upsert(T&&)` | `true` if the value was added, `false` if an equivalent element was already present and has been assigned over |
 | `erase(const T&)` | `true` if an element was removed |
 | `find(const T&)` | iterator to the element, or `end()`; a membership test is `find(v) != end()` |
 | `lower_bound(const T&)` | first element not ordered before the argument |

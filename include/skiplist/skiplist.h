@@ -36,6 +36,10 @@ class SkipList {
   [[nodiscard]] bool insert(const T& value);
   [[nodiscard]] bool insert(T&& value);
 
+  // False: updated, True: inserted
+  [[nodiscard]] bool upsert(const T& value);
+  [[nodiscard]] bool upsert(T&& value);
+
   [[nodiscard]] bool erase(const T& value);
   [[nodiscard]] bool empty() const noexcept;
   [[nodiscard]] std::size_t size() const noexcept;
